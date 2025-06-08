@@ -26,6 +26,7 @@ export default function ChatWindow() {
   const [session, setSession] = useState<Session | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [showGuideTooltip, setShowGuideTooltip] = useState(true)
+  const [quickActionOptions, setQuickActionOptions] = useState<string[] | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -42,6 +43,55 @@ export default function ChatWindow() {
     })
     return markdown
   }
+
+  // Helper function to determine quick action options based on bot's latest reply
+  const getQuickActionOptions = useCallback((botReply: string): string[] | null => {
+    if (!botReply) return null
+
+    // Check for initial welcome message (more robust check)
+    if (
+      botReply.includes("Halo! Selamat datang di HaloVet 🐾") &&
+      botReply.includes("Apa yang bisa saya bantu hari ini?")
+    ) {
+      return ["Konsultasi", "Lihat Jadwal Dokter", "Daftar"]
+    }
+
+    // Check for gender question
+    if (botReply.includes("Apakah hewan Anda jantan atau betina?")) {
+      return ["Jantan", "Betina"]
+    }
+
+    // Check for animal type question
+    if (botReply.includes("Termasuk jenis hewan apakah")) {
+      return ["kucing", "babi", "kelinci", "kambing", "kuda", "anjing", "domba", "sapi"]
+    }
+
+    // Yes/No questions (using keywords for robustness against dynamic pet_name)
+    const yesNoQuestionKeywords = [
+      "produksi susu terganggu",
+      "mengalami demam",
+      "mengeluarkan cairan dari hidung",
+      "sering bersin-bersin",
+      "terdapat luka pada kulit",
+      "terlihat pincang atau sulit berjalan",
+      "ada masalah pada bulu atau kulit",
+      "tampak lemas atau tidak aktif",
+      "mengalami diare",
+      "tampak kesulitan bernapas",
+      "gerakan menjadi terbatas",
+      "menunjukkan tanda-tanda dehidrasi",
+      "berat badan menurun",
+    ]
+
+    const lowerCaseBotReply = botReply.toLowerCase()
+    const isYesNoQuestion = yesNoQuestionKeywords.some((keyword) => lowerCaseBotReply.includes(keyword.toLowerCase()))
+
+    if (isYesNoQuestion) {
+      return ["Ya", "Tidak"]
+    }
+
+    return null
+  }, [])
 
   // Function to send the initial "test" prompt to the server
   const sendInitialTestPrompt = useCallback(async () => {
@@ -72,6 +122,7 @@ export default function ChatWindow() {
       const botMessage: Message = { id: Date.now().toString(), role: "bot", content: botReplyContent }
       setMessages([botMessage]) // Set only the bot's initial message
       setSession(data.session)
+      setQuickActionOptions(getQuickActionOptions(botReplyContent)) // Set options based on initial reply
     } catch (error) {
       console.error("Error sending initial test prompt:", error)
       let errorMessage = "Maaf, terjadi kesalahan saat memuat chat. Silakan coba lagi."
@@ -81,10 +132,11 @@ export default function ChatWindow() {
         errorMessage = `Terjadi kesalahan: ${error.message}.`
       }
       setMessages([{ id: Date.now().toString(), role: "bot", content: errorMessage }])
+      setQuickActionOptions(null) // Hide options on error
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [getQuickActionOptions])
 
   // Load messages and session from localStorage on initial mount
   useEffect(() => {
@@ -96,6 +148,11 @@ export default function ChatWindow() {
       setMessages(parsedMessages)
       if (parsedMessages.length > 0) {
         setShowGuideTooltip(false)
+        // Re-evaluate quick action options for the last bot message if available
+        const lastBotMessage = parsedMessages.findLast((msg: Message) => msg.role === "bot")
+        if (lastBotMessage) {
+          setQuickActionOptions(getQuickActionOptions(lastBotMessage.content))
+        }
       }
     } else {
       sendInitialTestPrompt()
@@ -105,7 +162,7 @@ export default function ChatWindow() {
     if (storedSession) {
       setSession(JSON.parse(storedSession))
     }
-  }, [sendInitialTestPrompt])
+  }, [sendInitialTestPrompt, getQuickActionOptions])
 
   // Save messages to localStorage whenever they change
   useEffect(() => {
@@ -128,15 +185,18 @@ export default function ChatWindow() {
     }
   }, [messages])
 
-  const handleSendMessage = async (e?: React.FormEvent) => {
+  const handleSendMessage = async (e?: React.FormEvent, messageContent?: string) => {
     e?.preventDefault()
-    if (!input.trim() || isLoading) return
+    const contentToSend = messageContent || input.trim()
 
-    const userMessage: Message = { id: Date.now().toString(), role: "user", content: input }
+    if (!contentToSend || isLoading) return
+
+    const userMessage: Message = { id: Date.now().toString(), role: "user", content: contentToSend }
     setMessages((prev) => [...prev, userMessage])
-    setInput("")
+    setInput("") // Clear input field regardless of how message was sent
     setIsLoading(true)
     setShowGuideTooltip(false) // Hide tooltip after first user message
+    setQuickActionOptions(null) // Hide options immediately after user sends message
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/agent`, {
@@ -164,6 +224,7 @@ export default function ChatWindow() {
       const botMessage: Message = { id: Date.now().toString(), role: "bot", content: botReplyContent }
       setMessages((prev) => [...prev, botMessage])
       setSession(data.session)
+      setQuickActionOptions(getQuickActionOptions(botReplyContent)) // Set new options based on bot's reply
     } catch (error) {
       console.error("Error sending message:", error)
       let errorMessage = "Maaf, terjadi kesalahan. Silakan coba lagi."
@@ -173,9 +234,15 @@ export default function ChatWindow() {
         errorMessage = `Terjadi kesalahan: ${error.message}.`
       }
       setMessages((prev) => [...prev, { id: Date.now().toString(), role: "bot", content: errorMessage }])
+      setQuickActionOptions(null) // Hide options on error
     } finally {
       setIsLoading(false)
     }
+  }
+
+  const handleQuickActionClick = (option: string) => {
+    // Directly pass the option to handleSendMessage
+    handleSendMessage(undefined, option)
   }
 
   const handleResetChat = async () => {
@@ -188,7 +255,7 @@ export default function ChatWindow() {
         },
         body: JSON.stringify({
           user_id: USER_ID,
-          message: "", // Set message to an empty string as requested
+          message: "", // As per your instruction, message is an empty string on reset
         }),
       })
 
@@ -202,9 +269,11 @@ export default function ChatWindow() {
       localStorage.removeItem(MESSAGES_STORAGE_KEY)
       localStorage.removeItem(SESSION_STORAGE_KEY)
       setShowGuideTooltip(true) // Show tooltip again after reset
+      // Removed: setQuickActionOptions(null); // This was causing the issue
     } catch (error) {
       console.error("Error resetting chat:", error)
       setMessages([{ id: Date.now().toString(), role: "bot", content: "Maaf, gagal mereset chat. Silakan coba lagi." }])
+      setQuickActionOptions(null) // Hide options on error
     } finally {
       setIsLoading(false)
     }
@@ -253,18 +322,34 @@ export default function ChatWindow() {
         </ScrollArea>
       </CardContent>
       <CardFooter className="border-t p-4">
-        <form onSubmit={handleSendMessage} className="flex w-full space-x-2">
-          <Input
-            placeholder="Ketik pesan Anda..."
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={isLoading}
-            className="flex-1 text-foreground"
-          />
-          <Button type="submit" disabled={isLoading}>
-            {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Kirim"}
-          </Button>
-        </form>
+        {quickActionOptions && quickActionOptions.length > 0 ? (
+          <div className="flex flex-wrap gap-2 w-full justify-center">
+            {quickActionOptions.map((option) => (
+              <Button
+                key={option}
+                onClick={() => handleQuickActionClick(option)}
+                disabled={isLoading}
+                variant="outline"
+                className="flex-1 min-w-[100px] sm:flex-none"
+              >
+                {option}
+              </Button>
+            ))}
+          </div>
+        ) : (
+          <form onSubmit={handleSendMessage} className="flex w-full space-x-2">
+            <Input
+              placeholder="Ketik pesan Anda..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              disabled={isLoading}
+              className="flex-1 text-foreground"
+            />
+            <Button type="submit" disabled={isLoading}>
+              {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Kirim"}
+            </Button>
+          </form>
+        )}
       </CardFooter>
     </Card>
   )
